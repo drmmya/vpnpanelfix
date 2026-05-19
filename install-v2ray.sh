@@ -85,8 +85,8 @@ generate_reality_keypair(){
   out="$($bin x25519 2>&1 || true)"
   priv="$(printf '%s\n' "$out" | sed -nE 's/.*[Pp]rivate[[:space:]_-]*[Kk]ey[[:space:]]*:[[:space:]]*([A-Za-z0-9_-]+).*/\1/p' | head -1)"
   pub="$(printf '%s\n' "$out" | sed -nE 's/.*[Pp]ublic[[:space:]_-]*[Kk]ey[[:space:]]*:[[:space:]]*([A-Za-z0-9_-]+).*/\1/p' | head -1)"
-  # Newer Xray builds may label the public key as "Password:" in x25519 output.
-  [[ -n "$pub" ]] || pub="$(printf '%s\n' "$out" | sed -nE 's/.*[Pp]assword[[:space:]]*:[[:space:]]*([A-Za-z0-9_-]+).*/\1/p' | head -1)"
+  # Newer Xray builds may label the public key as "Password:" or "Password (PublicKey):".
+  [[ -n "$pub" ]] || pub="$(printf '%s\n' "$out" | sed -nE 's/.*[Pp]assword([^:]*)?:[[:space:]]*([A-Za-z0-9_-]+).*/\2/p' | head -1)"
   if [[ -n "$priv" && -n "$pub" ]]; then
     PRIVATE_KEY="$priv"
     PUBLIC_KEY="$pub"
