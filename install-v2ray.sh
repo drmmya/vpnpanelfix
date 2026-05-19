@@ -63,6 +63,41 @@ port_used(){ local port="$1"; ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -
 rand_hex(){ local n="${1:-8}"; openssl rand -hex "$n" 2>/dev/null || head -c "$n" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 read_env(){ local k="$1" d="${2:-}" f="$DATA_DIR/v2ray.env"; [[ -f "$f" ]] && grep -E "^${k}=" "$f" | tail -1 | cut -d= -f2- || printf '%s' "$d"; }
 
+find_xray_bin(){
+  local b
+  for b in "${XRAY_BIN:-}" "$(command -v xray 2>/dev/null || true)" /usr/local/bin/xray /usr/bin/xray; do
+    [[ -n "$b" && -x "$b" ]] && { printf '%s' "$b"; return 0; }
+  done
+  return 1
+}
+
+install_or_update_xray(){
+  echo "[V2Ray/Xray] Installing/updating Xray core..."
+  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" install >/dev/null
+  hash -r 2>/dev/null || true
+}
+
+generate_reality_keypair(){
+  local bin out priv pub
+  bin="$(find_xray_bin || true)"
+  [[ -n "$bin" ]] || return 1
+  # Xray output can vary slightly by version: "Private key:" or "PrivateKey:".
+  out="$($bin x25519 2>&1 || true)"
+  priv="$(printf '%s\n' "$out" | sed -nE 's/.*[Pp]rivate[[:space:]_-]*[Kk]ey[[:space:]]*:[[:space:]]*([A-Za-z0-9_-]+).*/\1/p' | head -1)"
+  pub="$(printf '%s\n' "$out" | sed -nE 's/.*[Pp]ublic[[:space:]_-]*[Kk]ey[[:space:]]*:[[:space:]]*([A-Za-z0-9_-]+).*/\1/p' | head -1)"
+  # Newer Xray builds may label the public key as "Password:" in x25519 output.
+  [[ -n "$pub" ]] || pub="$(printf '%s\n' "$out" | sed -nE 's/.*[Pp]assword[[:space:]]*:[[:space:]]*([A-Za-z0-9_-]+).*/\1/p' | head -1)"
+  if [[ -n "$priv" && -n "$pub" ]]; then
+    PRIVATE_KEY="$priv"
+    PUBLIC_KEY="$pub"
+    XRAY_BIN_PATH="$bin"
+    return 0
+  fi
+  XRAY_KEYGEN_LAST_OUTPUT="$out"
+  return 1
+}
+
+
 is_port "$V2_PORT" || { echo "ERROR: Invalid V2Ray/Xray port: $V2_PORT" >&2; exit 1; }
 is_port "$XRAY_API_PORT" || { echo "ERROR: Invalid Xray API port: $XRAY_API_PORT" >&2; exit 1; }
 
@@ -88,18 +123,30 @@ if port_used "$XRAY_API_PORT"; then
   exit 1
 fi
 
-if ! command -v xray >/dev/null 2>&1; then
-  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" install >/dev/null
+if ! find_xray_bin >/dev/null 2>&1; then
+  install_or_update_xray
 fi
 
+XRAY_BIN_PATH="$(find_xray_bin || true)"
 PRIVATE_KEY="${V2_PRIVATE_KEY:-$(read_env V2_PRIVATE_KEY '')}"
 PUBLIC_KEY="${V2_PUBLIC_KEY:-$(read_env V2_PUBLIC_KEY '')}"
 if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
-  KEY_OUT="$(xray x25519 2>/dev/null || true)"
-  PRIVATE_KEY="$(printf '%s\n' "$KEY_OUT" | awk -F': ' '/Private key/ {print $2; exit}')"
-  PUBLIC_KEY="$(printf '%s\n' "$KEY_OUT" | awk -F': ' '/Public key/ {print $2; exit}')"
+  if ! generate_reality_keypair; then
+    echo "[V2Ray/Xray] x25519 key generation failed. Updating Xray and trying again..."
+    install_or_update_xray
+    if ! generate_reality_keypair; then
+      echo "ERROR: Could not generate Xray REALITY key pair." >&2
+      echo "Tried Xray binary: $(find_xray_bin 2>/dev/null || echo 'not found')" >&2
+      if [[ -n "${XRAY_KEYGEN_LAST_OUTPUT:-}" ]]; then
+        echo "xray x25519 output:" >&2
+        printf '%s\n' "$XRAY_KEYGEN_LAST_OUTPUT" >&2
+      fi
+      exit 1
+    fi
+  fi
 fi
-[[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || { echo "ERROR: Could not generate Xray REALITY key pair." >&2; exit 1; }
+[[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || { echo "ERROR: Empty Xray REALITY key pair." >&2; exit 1; }
+XRAY_BIN_PATH="${XRAY_BIN_PATH:-$(find_xray_bin || echo xray)}"
 
 cat >"$XRAY_CFG" <<EOFJSON
 {
@@ -183,7 +230,7 @@ cat >"$XRAY_CFG" <<EOFJSON
 }
 EOFJSON
 
-xray test -config "$XRAY_CFG" >/dev/null
+"$XRAY_BIN_PATH" test -config "$XRAY_CFG" >/dev/null
 iptables -C INPUT -p tcp --dport "$V2_PORT" -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport "$V2_PORT" -j ACCEPT
 
 cat >"$DATA_DIR/v2ray.env" <<EOFENV
